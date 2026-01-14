@@ -1,0 +1,175 @@
+//Pinescriipt @version=6
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers: clamp + time-units -> bars (timeframe agnostic)
+// ─────────────────────────────────────────────────────────────────────────────
+clamp_int(x, lo, hi) =>
+    int(math.max(lo, math.min(hi, x)))
+
+tfSec = timeframe.in_seconds(timeframe.period)
+
+// Convert days/hours to bars, clamped for stability/performance
+barsFromDays(_days, _minBars, _maxBars) =>
+    // days → seconds → bars
+    float bars = math.round((_days * 86400.0) / tfSec)
+    clamp_int(bars, _minBars, _maxBars)
+
+barsFromHours(_hrs, _minBars, _maxBars) =>
+    float bars = math.round((_hrs * 3600.0) / tfSec)
+    clamp_int(bars, _minBars, _maxBars)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inputs (time-based so it adapts to any timeframe)
+// ─────────────────────────────────────────────────────────────────────────────
+src = input.source(close, "Source")
+
+lookbackDays   = input.float(14.0, "Envelope Lookback (days)", minval=2.0, step=0.5)
+bandMult       = input.float(2.2,  "Band Multiplier", minval=0.1, step=0.1)
+bandwidthFrac  = input.float(0.20, "Kernel Bandwidth (% of lookback)", minval=0.05, maxval=0.60, step=0.01)
+
+// Band width composition (universal across tokens)
+bandMode  = input.string("ATR+MAE", "Band Width Mode", options=["ATR", "MAE", "ATR+MAE"])
+atrDays   = input.float(3.0, "ATR Window (days)", minval=0.5, step=0.5)
+atrWeight = input.float(1.0, "ATR Weight (ATR+MAE)", minval=0.0, step=0.1)
+maeWeight = input.float(1.0, "MAE Weight (ATR+MAE)", minval=0.0, step=0.1)
+
+// Trend regime (bull vs bear) — time-based
+trendDays      = input.float(30.0, "Trend EMA (days)", minval=3.0, step=1.0)
+useSlopeFilter = input.bool(true, "Trend filter requires EMA slope up?")
+
+// Momentum engine
+signalMode = input.string("MACD", "Momentum Engine", options=["MACD", "RSI"])
+
+// MACD in days (converted to bars)
+macdFastDays  = input.float(3.0, "MACD Fast (days)", minval=0.5, step=0.5)
+macdSlowDays  = input.float(7.0, "MACD Slow (days)", minval=1.0, step=0.5)
+macdSigDays   = input.float(2.0, "MACD Signal (days)", minval=0.5, step=0.5)
+
+// RSI in days (converted to bars)
+rsiDays = input.float(3.0, "RSI Length (days)", minval=0.5, step=0.5)
+rsiOS   = input.int(40, "RSI Oversold Gate (buys)", minval=10, maxval=50)
+rsiOB   = input.int(60, "RSI Overbought Gate (sells)", minval=50, maxval=90)
+
+// Zones
+entryMode = input.string("Touch Lower Band", "Buy Zone", options=["Touch Lower Band", "Close Below Lower Band"])
+exitMode  = input.string("Above Center", "Sell Zone", options=["Above Center", "Touch Upper Band"])
+
+// Display
+showBands  = input.bool(true, "Show Bands")
+showCenter = input.bool(false, "Show Center")
+showBuys   = input.bool(true, "Show Buys")
+showSells  = input.bool(true, "Show Sells")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Convert time settings → bars (clamped for speed/stability)
+// ─────────────────────────────────────────────────────────────────────────────
+len      = barsFromDays(lookbackDays, 30, 300)
+bandBars = clamp_int(math.round(len * bandwidthFrac), 5, 120)
+
+atrLen   = barsFromDays(atrDays, 5, 200)
+trendLen = barsFromDays(trendDays, 20, 500)
+
+macdFast = barsFromDays(macdFastDays, 2, 100)
+macdSlow = barsFromDays(macdSlowDays, macdFast + 1, 250)
+macdSig  = barsFromDays(macdSigDays, 2, 80)
+
+rsiLen   = barsFromDays(rsiDays, 5, 100)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Kernel regression (Gaussian weights)
+// ─────────────────────────────────────────────────────────────────────────────
+kernel_regression(_src, _len, _hBars) =>
+    float num = 0.0
+    float den = 0.0
+    float hh  = _hBars * _hBars
+    for i = 0 to _len - 1
+        float w = math.exp(-(i * i) / (2.0 * hh))
+        num += _src[i] * w
+        den += w
+    den == 0.0 ? na : num / den
+
+kr = kernel_regression(src, len, bandBars)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Adaptive envelope width (universal across tokens)
+// ─────────────────────────────────────────────────────────────────────────────
+mae = ta.sma(math.abs(src - kr), len)
+atr = ta.atr(atrLen)
+
+rawWidth =
+     bandMode == "ATR" ? atr :
+     bandMode == "MAE" ? mae :
+     (atrWeight * atr + maeWeight * mae)
+
+width    = rawWidth * bandMult
+buyLine  = kr - width
+sellLine = kr + width
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Trend regime classification
+// ─────────────────────────────────────────────────────────────────────────────
+emaTrend   = ta.ema(close, trendLen)
+bullRegime = close > emaTrend and (not useSlopeFilter or emaTrend > emaTrend[1])
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Momentum inflection: early buys + momentum-loss sells
+// ─────────────────────────────────────────────────────────────────────────────
+[macdLine, macdSigLine, macdHist] = ta.macd(close, macdFast, macdSlow, macdSig)
+
+rsi      = ta.rsi(close, rsiLen)
+rsiDelta = rsi - rsi[1]
+
+float mom   = na
+float momSm = na
+
+if signalMode == "MACD"
+    mom   := macdHist
+    momSm := ta.ema(macdHist, 3)
+else
+    mom   := rsiDelta
+    momSm := ta.ema(rsiDelta, 3)
+
+// Inflection turns (local slope reversal)
+turnUp   = momSm > momSm[1] and momSm[1] <= momSm[2]
+turnDown = momSm < momSm[1] and momSm[1] >= momSm[2]
+
+// RSI gating only when RSI engine selected
+buyGate  = signalMode == "RSI" ? (rsi < rsiOS) : true
+sellGate = signalMode == "RSI" ? (rsi > rsiOB) : true
+
+// Zones
+touchLower = low <= buyLine
+closeBelow = close <= buyLine
+buyZone    = entryMode == "Touch Lower Band" ? touchLower : closeBelow
+
+aboveCenter = close >= kr
+touchUpper  = high >= sellLine
+sellZone    = exitMode == "Above Center" ? aboveCenter : touchUpper
+
+// Signals
+earlyBuy  = buyZone and turnUp and buyGate
+earlySell = sellZone and turnDown and sellGate
+
+bullBuy = earlyBuy and bullRegime
+bearBuy = earlyBuy and not bullRegime
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Plots
+// ─────────────────────────────────────────────────────────────────────────────
+plot(showBands ? buyLine : na,  "Buy Line",  color=color.new(color.lime, 0), linewidth=2)
+plot(showBands ? sellLine: na,  "Sell Line", color=color.new(color.red,  0), linewidth=2)
+plot(showCenter ? kr : na, "Center", color=color.new(color.gray, 65), linewidth=1)
+
+plotshape(showBuys and bullBuy, title="Bull Early Buy", style=shape.triangleup, location=location.belowbar,
+     color=color.new(color.lime, 0), size=size.tiny, text="BUY")
+
+plotshape(showBuys and bearBuy, title="Bear Early Buy", style=shape.triangleup, location=location.belowbar,
+     color=color.new(color.orange, 0), size=size.tiny, text="BUY")
+
+plotshape(showSells and earlySell, title="Momentum Loss Sell", style=shape.triangledown, location=location.abovebar,
+     color=color.new(color.red, 0), size=size.tiny, text="SELL")
+
+alertcondition(bullBuy, "Bull Early Buy", "Bull Early Buy: lower band zone + momentum turns up (bull regime)")
+alertcondition(bearBuy, "Bear Early Buy", "Bear Early Buy: lower band zone + momentum turns up (bear/neutral regime)")
+alertcondition(earlySell, "Momentum Loss Sell", "Sell: momentum turns down in sell zone")
+
