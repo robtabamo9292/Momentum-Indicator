@@ -13,9 +13,6 @@ Adapts automatically to **any timeframe** and **any token’s volatility**.
   - **Bull Buy:** above trend EMA (optionally EMA slope up)  
   - **Bear Buy:** outside bull regime (treat as mean reversion / smaller targets)
 
-### Install
-TradingView → **Pine Editor** → paste `ae-envelope.pine` → **Add to chart** → adjust settings (⚙️).
-
 ### Key settings
 - **Envelope Lookback (days):** higher = smoother/fewer signals; lower = faster/more signals  
 - **Band Multiplier:** lower = earlier/more trades; higher = cleaner/fewer trades  
@@ -32,12 +29,6 @@ TradingView → **Pine Editor** → paste `ae-envelope.pine` → **Add to chart*
 - Sell Zone: `Above Center`
 - Momentum: `MACD`
 - Trend slope filter: `ON`
-
-### Simple playbook
-- Prefer **Bull Buys**
-- Stop: below recent swing low
-- TP1: center line, TP2: upper band
-- Exit remainder on **SELL**
 
 ### Quick tuning (too much chop)
 - Band Mult `+0.2` (e.g., 2.3 → 2.5)
