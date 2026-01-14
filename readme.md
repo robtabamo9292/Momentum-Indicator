@@ -1,5 +1,6 @@
 ### What it does
-Plots an adaptive envelope around a smoothed “fair value” centerline:
+
+Plotsa smoothed “fair value” centerline:
 - **Center**: kernel regression (fair value)
 - **Buy Line**: lower band (oversold/dip zone)
 - **Sell Line**: upper band (overextension zone)  
